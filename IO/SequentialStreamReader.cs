@@ -81,5 +81,20 @@ namespace MP4Reader.IO
         {
             return _stream.Position + numberOfBytes > _stream.Length;
         }
+
+        /// <summary>
+        /// Peek the stream - this returns the next count bytes 
+        /// of the (without changing the current position).
+        /// </summary>
+        /// <param name="count">Number of Bytes to return</param>
+        /// <returns></returns>
+        public byte[] Peek(int count)
+        {
+            byte[] result = new byte[count];
+            var originalPosition = _stream.Position;
+            _stream.Read(result, 0, count);
+            _stream.Position = originalPosition;
+            return result;
+        }
     }
 }

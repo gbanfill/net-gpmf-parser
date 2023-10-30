@@ -286,7 +286,7 @@ namespace MP4Reader.IO
         /// <param name="encoding">An optional string encoding. If none is provided, <see cref="Encoding.UTF8"/> is used.</param>
         /// <returns>The read <see cref="string"/></returns>
         /// <exception cref="IOException">The buffer does not contain enough bytes to satisfy this request.</exception>
-        public string GetNullTerminatedString(int maxLengthBytes, Encoding? encoding = null)
+        public string GetNullTerminatedString(int maxLengthBytes, Encoding encoding = null)
         {
             var bytes = GetNullTerminatedBytes(maxLengthBytes);
 

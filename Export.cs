@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Text;
 using System.Xml;
 
@@ -8,7 +9,7 @@ namespace Cromatix.MP4Reader
     {
         public static bool ExportToFile(this MP4MetadataReader reader, string filePath, ExportFormat format)
         {
-            if (reader.Telemetry.KLVs == null || reader.Telemetry.KLVs.Count == 0)
+            if (reader.Telemetry.LocationKLVs == null || reader.Telemetry.LocationKLVs.Count == 0)
                 return false;
 
             try
@@ -48,7 +49,7 @@ namespace Cromatix.MP4Reader
             XmlDocument xmlDoc = new XmlDocument();
 
             string gpx = @"<?xml version=""1.0"" encoding=""UTF-8""?>" +
-                @$"<gpx xmlns=""http://www.topografix.com/GPX/1/1"" version=""1.0"">
+                $@"<gpx xmlns=""http://www.topografix.com/GPX/1/1"" version=""1.0"">
                     <trk>
                         <trkseg>
                             {TelemetryToGPXString(telemetry)}
@@ -64,14 +65,20 @@ namespace Cromatix.MP4Reader
         {
             StringBuilder sb = new StringBuilder();
 
-            foreach (var klv in telemetry.KLVs)
+            foreach (var klv in telemetry.LocationKLVs)
             {
-                sb.AppendLine(@$"<trkpt lat=""{klv.Lat}"" lon=""{klv.Lon}"">
+                sb.Append($@"<trkpt lat=""{klv.Lat}"" lon=""{klv.Lon}"">
                                     <ele>{klv.Alt}</ele>
-                                    <time>{klv.Time.Value.ToString("yyyy-MM-ddTHH:mm:ss:fffZ")}</time>
+                                    <time>{klv.Time.Value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")}</time>
                                     <fix>{klv.GPSFix}</fix>
-                                    <hdop>{klv.HDOP}</hdop>
-                                 </trkpt>");
+                                    <hdop>{klv.HDOP}</hdop>");
+                //if (klv.Yaw.HasValue)
+                //{
+                //    sb.Append($@"                                    <yaw>{klv.Yaw}</yaw>
+                //                    <course>{klv.Yaw}</course>
+                //                   ");
+                //}
+                sb.AppendLine("</trkpt>");
             }
 
             return sb.ToString();

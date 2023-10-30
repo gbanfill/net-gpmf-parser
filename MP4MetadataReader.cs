@@ -1,6 +1,11 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using MP4Reader;
 using MP4Reader.IO;
 
 namespace Cromatix.MP4Reader
@@ -38,6 +43,10 @@ namespace Cromatix.MP4Reader
         internal int[] MetaSizes { get; private set; }
         internal int[] MetaOffsets { get; private set; }
         internal int MetaSTCOCount { get; private set; }
+
+        /// <summary>
+        /// Video length in Seconds
+        /// </summary>
         internal double VideoLength { get; private set; }
         internal int[] TrakEditOffsets = new int[MAX_TRACKS];
         internal List<SampleToChunk> MetaSTSC { get; private set; }
@@ -56,9 +65,9 @@ namespace Cromatix.MP4Reader
             }
         }
 
-        public Telemetry Telemetry 
-        { 
-            get { return telemetry; } 
+        public Telemetry Telemetry
+        {
+            get { return telemetry; }
         }
 
         public MP4MetadataReader(Stream stream)
@@ -67,13 +76,18 @@ namespace Cromatix.MP4Reader
             ReadMetadata();
         }
 
+        /// <summary>
+        /// Process the track and load all the KLV values from it.
+        /// </summary>
         public void ProcessGPMFTelemetry()
         {
             int payloads = GetNumberOfPayloads;
             int gpsIndex = 0;
             bool hasGPS9Data = false;
-            telemetry.KLVs = new List<KLV>();
+            telemetry.LocationKLVs = new List<LocationKLV>();
+            telemetry.AttitudeKLVs = new List<AttitudeKLV>();
 
+            List<string> seenFourCC = new List<string>();
             for (int index = 0; index < payloads; index++)
             {
                 double _in; double _out;
@@ -87,10 +101,16 @@ namespace Cromatix.MP4Reader
                     short DilutionOfPrecision = 0;
                     DateTime? utcStartTime = default(DateTime);
 
+                    Rotations lastRotationData = null;
+
                     do
                     {
                         isNext = GetGPMF(gpmf);
 
+                        if (!seenFourCC.Contains(gpmf.FourCC))
+                        {
+                            seenFourCC.Add(gpmf.FourCC);
+                        }
                         // GPS Precision - Dilution of Precision (DOP x100)
                         // https://en.wikipedia.org/wiki/Dilution_of_precision_(navigation)
                         if (gpmf.FourCC == "GPSP")
@@ -135,6 +155,32 @@ namespace Cromatix.MP4Reader
                         {
                             var bytes = new ReadOnlySpan<byte>(gpmf.Content, gpmf.Position + 8, gpmf.StructSize).ToArray();
                             utcStartTime = GPSUToUTCDate(ByteUtil.BytesToString(bytes, false));
+                            if (telemetry.StartTime == null)
+                            {
+                                telemetry.StartTime = utcStartTime.Value;
+                            }
+                        }
+
+                        if (gpmf.FourCC == "MAGN")
+                        {
+                            GetPayloadTime(gpsIndex, out _in, out _out);
+                            int repeats = gpmf.Repeat;
+                            double increment = (_out - _in) / repeats;
+
+                            int pos = gpmf.Position;
+                            for (int i = 0; i < repeats; i++)
+                            {
+                                var klv = new AttitudeKLV();
+                                klv.OffsetFromUTCBaseTime = TimeSpan.FromSeconds(_in + (increment * i));
+
+                                var bytes = new ReadOnlySpan<byte>(gpmf.Content, gpmf.Position + 8, gpmf.StructSize).ToArray();
+                                var rawData = GetMagnValues(gpmf, devisors, ref pos);
+                                lastRotationData = CalculateRotationData(rawData);
+                                klv.Yaw = lastRotationData.Yaw;
+                                klv.Pitch = lastRotationData.Pitch;
+                                klv.Roll = lastRotationData.Roll;
+                                telemetry.AttitudeKLVs.Add(klv);
+                            }
                         }
 
                         if (gpmf.FourCC == "GPS9" && gpmf.Repeat > 0 && devisors != null)
@@ -144,15 +190,15 @@ namespace Cromatix.MP4Reader
 
                             devisors = devisors.Reverse().ToArray();
 
-                            if (hasGPS9Data == false && telemetry.KLVs.Count > 0)
+                            if (hasGPS9Data == false && telemetry.LocationKLVs.Count > 0)
                             {
                                 hasGPS9Data = true;
-                                telemetry.KLVs.Clear();
+                                telemetry.LocationKLVs.Clear();
                             }
 
                             for (int i = 0; i < repeats; i++)
                             {
-                                var klv = new KLV();
+                                var klv = new LocationKLV();
                                 var cv = GetCoordValues9(gpmf, devisors, ref pos);
 
                                 klv.Time = epoch2.AddDays(cv.d2000).AddSeconds(cv.Seconds);
@@ -177,13 +223,13 @@ namespace Cromatix.MP4Reader
                                         break;
                                 }
 
-                                telemetry.KLVs.Add(klv);
+                                telemetry.LocationKLVs.Add(klv);
                             }
                         }
 
-                        if (gpmf.FourCC == "GPS5" && 
-                            gpmf.Repeat > 0 && 
-                            devisors != null && 
+                        if (gpmf.FourCC == "GPS5" &&
+                            gpmf.Repeat > 0 &&
+                            devisors != null &&
                             hasGPS9Data == false)
                         {
                             GetPayloadTime(gpsIndex, out _in, out _out);
@@ -203,10 +249,10 @@ namespace Cromatix.MP4Reader
 
                             for (int i = 0; i < repeats; i++)
                             {
-                                var klv = new KLV();
+                                var klv = new LocationKLV();
                                 var cv = GetCoordValues5(gpmf, devisors, ref pos);
 
-                                if (telemetry.KLVs.Count > 0 && telemetry.KLVs[telemetry.KLVs.Count - 1].Time != null)
+                                if (telemetry.LocationKLVs.Count > 0 && telemetry.LocationKLVs[telemetry.LocationKLVs.Count - 1].Time != null)
                                 {
                                     klv.Time = utcStartTime.Value.AddSeconds(increment);
                                     utcStartTime = klv.Time.Value;
@@ -224,19 +270,55 @@ namespace Cromatix.MP4Reader
                                 klv.HDOP = DilutionOfPrecision;
                                 klv.GPSFix = GPSFix;
 
-                                telemetry.KLVs.Add(klv);
+                                telemetry.LocationKLVs.Add(klv);
                             }
                         }
                     }
                     while (isNext);
                 }
             }
+
+            foreach (var attitudeKlv in telemetry.AttitudeKLVs)
+            {
+                attitudeKlv.Time = telemetry.StartTime + attitudeKlv.OffsetFromUTCBaseTime;
+            }
+
+            Debug.WriteLine($"Video Duration: {TimeSpan.FromSeconds(VideoLength)}");
+            Debug.WriteLine($"GPS:  Duration {telemetry.LocationKLVs.Last().Time - telemetry.LocationKLVs.First().Time}. {telemetry.LocationKLVs.Count} data points. From {telemetry.LocationKLVs.First().Time} to {telemetry.LocationKLVs.Last().Time}");
+            Debug.WriteLine($"MAGN: Duration {telemetry.AttitudeKLVs.Last().Time - telemetry.AttitudeKLVs.First().Time}. {telemetry.AttitudeKLVs.Count} data points. From {telemetry.AttitudeKLVs.First().Time} to {telemetry.AttitudeKLVs.Last().Time}");
+        }
+
+        double AverageX = 156.23;
+        double AverageY = 21.3;
+        private Rotations CalculateRotationData(Magn rawData)
+        {
+            var normalizedX = rawData.X - AverageX;
+            var normalizedY = (rawData.Y - AverageY) * -1;
+            var yaw = (Math.Atan2(normalizedY, normalizedX) * (180 / Math.PI) + 360) % 360;
+            return new Rotations
+            {
+                RawData = rawData,
+                Yaw = yaw,
+            };
+        }
+
+        private Magn GetMagnValues(GPMFStream gpmf, int[] elements, ref int pos)
+        {
+            var content = new ReadOnlySpan<byte>(gpmf.Content, pos + 8, gpmf.StructSize);
+            var result = new Magn
+            {
+                X = ByteUtil.ReadShort(ref content),
+                Y = ByteUtil.ReadShort(ref content),
+                Z = ByteUtil.ReadShort(ref content),
+            };
+            pos += gpmf.StructSize;
+            return result;
         }
 
         private GPS5 GetCoordValues5(GPMFStream gpmf, int[] elements, ref int pos)
         {
             var content = new ReadOnlySpan<byte>(gpmf.Content, pos + 8, gpmf.StructSize);
-            var result = new GPS5 
+            var result = new GPS5
             {
                 Lat = ByteUtil.ReadLong(ref content) / (double)elements[0],
                 Lon = ByteUtil.ReadLong(ref content) / (double)elements[1],
@@ -269,6 +351,10 @@ namespace Cromatix.MP4Reader
             return result;
         }
 
+        /// <summary>
+        /// This reads the header information from the Mp4 metadata track and works out the size and data types that the 
+        /// metadata stream contains
+        /// </summary>
         private void ReadMetadata()
         {
             var reader = new SequentialStreamReader(_stream);
@@ -285,37 +371,40 @@ namespace Cromatix.MP4Reader
 
                 if (allowedAtoms.Contains(atomName))
                 {
+
                     switch (atomName)
                     {
-                        case "mvhd":
+                        case "mvhd": // movie header
                             {
                                 reader.Skip(12);
                                 ClockDaemon = reader.GetInt32();
                                 ClockCount = reader.GetInt32();
                                 reader.Skip(atomSize - 8 - 20); // skip over mvhd
+                                Debug.WriteLine($"Processing Atom: {atomName}. ClockDaemon {ClockDaemon} ClockCount {ClockCount} ");
                                 break;
                             }
-                        case "trak":
+                        case "trak": // track header
                             {
                                 if (TrakNum + 1 < MAX_TRACKS)
                                     TrakNum++;
-
+                                Debug.WriteLine($"Processing Atom: {atomName}. Track {TrakNum} ");
                                 break;
                             }
-                        case "mdhd":
+                        case "mdhd": //media header
                             {
-                                reader.Skip(4);
+                                reader.Skip(4); // version 1byte + flags 3bytes
                                 CreationTime = epoch.AddTicks(TimeSpan.TicksPerSecond * reader.GetUInt32());
                                 ModificationTime = epoch.AddTicks(TimeSpan.TicksPerSecond * reader.GetUInt32());
                                 TrakClockDaemon = reader.GetInt32();
                                 TrakClockCount = reader.GetInt32();
-                                reader.Skip(4);
+                                reader.Skip(4); //language 2bytes + quality 2bytes
 
                                 if (VideoLength == 0.0)
                                 {
                                     VideoLength = (double)TrakClockCount / TrakClockDaemon;
                                 }
 
+                                Debug.WriteLine($"Processing Atom: {atomName}. VideoLength {VideoLength} seconds");
                                 reader.Skip(atomSize - 8 - 24);
 
                                 break;
@@ -324,6 +413,7 @@ namespace Cromatix.MP4Reader
                             {
                                 reader.Skip(8);
                                 trakType = ByteUtil.IntToString(reader.GetUInt32());
+                                Debug.WriteLine($"Processing Atom: {atomName}. TrackType {trakType} ");
                                 reader.Skip(atomSize - 8 - 12);
                                 break;
                             }
@@ -334,6 +424,7 @@ namespace Cromatix.MP4Reader
 
                                 reader.Skip(4);
                                 elst = reader.GetUInt32();
+                                Debug.WriteLine($"Processing Atom: {atomName}. ELST {elst} ");
                                 len = 8;
 
                                 if (ByteUtil.IntToString(elst) == "elst")
@@ -378,7 +469,7 @@ namespace Cromatix.MP4Reader
 
                                 break;
                             }
-                        case "stsd":
+                        case "stsd": //sample description to determine the type of metadata
                             {
                                 if (trakType == "meta")
                                 {
@@ -392,6 +483,7 @@ namespace Cromatix.MP4Reader
                                         trakType = string.Empty;
                                     }
 
+                                    Debug.WriteLine($"Processing Atom: {atomName}. trakSubType {trakSubType} ");
                                     reader.Skip(atomSize - 8 - len);
                                 }
                                 else
@@ -401,7 +493,7 @@ namespace Cromatix.MP4Reader
 
                                 break;
                             }
-                        case "stsc":
+                        case "stsc": // metadata stsc - offset chunks
                             {
                                 if (trakType == "meta")
                                 {
@@ -429,6 +521,7 @@ namespace Cromatix.MP4Reader
                                             len += 12;
                                         }
                                         while (num > 0);
+                                        Debug.WriteLine($"Processing Atom: {atomName}. MetaSTSC Count {MetaSTSC.Count} ");
                                     }
 
                                     reader.Skip(atomSize - 8 - len);
@@ -438,17 +531,19 @@ namespace Cromatix.MP4Reader
                                     reader.Skip(atomSize - 8);
                                 }
 
+
                                 break;
                             }
-                        case "stsz": // GPMF byte size for each payload
+                        case "stsz": // sizes - GPMF byte size for each payload
                             {
                                 if (trakType == "meta")
                                 {
                                     int equalsamplesize, num, len;
 
-                                    reader.Skip(4);
-                                    equalsamplesize = reader.GetInt32();
-                                    SamplesCount = num = reader.GetInt32();
+                                    reader.Skip(4); // version 1byte, flags 3bytes
+                                    equalsamplesize = reader.GetInt32(); // sample size
+
+                                    SamplesCount = num = reader.GetInt32(); //number of entries
 
                                     len = 12;
 
@@ -466,6 +561,7 @@ namespace Cromatix.MP4Reader
                                         while (num > 0);
 
                                         Array.Reverse(MetaSizes);
+                                        Debug.WriteLine($"Processing Atom: {atomName}. MetaSizes Count {MetaSizes.Count()} ");
                                     }
                                     else
                                     {
@@ -475,6 +571,7 @@ namespace Cromatix.MP4Reader
                                             MetaSizes[num] = equalsamplesize;
                                         }
                                         while (num > 0);
+                                        Debug.WriteLine($"Processing Atom: {atomName}. MetaSizes Count {MetaSizes.Count()} ");
                                     }
 
                                     reader.Skip(atomSize - 8 - len);
@@ -486,7 +583,7 @@ namespace Cromatix.MP4Reader
 
                                 break;
                             }
-                        case "stco":
+                        case "stco": // metadata stco - offsets
                             {
                                 if (trakType == "meta")
                                 {
@@ -494,7 +591,7 @@ namespace Cromatix.MP4Reader
 
                                     reader.Skip(4);
                                     num = reader.GetInt32();
-
+                                    Debug.WriteLine($"Processing Atom: {atomName}. num {num} ");
                                     len = 8;
 
                                     if (num <= ((atomSize - 8 - len) / sizeof(int)))
@@ -513,7 +610,7 @@ namespace Cromatix.MP4Reader
                                                 MetaOffsets[num] = reader.GetInt32();
                                                 len += 4;
                                             } while (num > 0);
-
+                                            Debug.WriteLine($"Processing Atom: {atomName}. MetaOffsets {MetaOffsets.Count()} ");
                                             Array.Reverse(MetaOffsets);
 
                                             fileoffset = MetaOffsets[stco_pos];
@@ -537,6 +634,7 @@ namespace Cromatix.MP4Reader
 
                                                 num++;
                                             }
+                                            Debug.WriteLine($"Processing Atom: {atomName}. MetaOffsets {MetaOffsets.Count()} ");
                                         }
                                         else if (num > 0 && MetasizeCount > 0 && MetaSizes.Length > 0 && atomSize > (num * 4))
                                         {
@@ -548,7 +646,7 @@ namespace Cromatix.MP4Reader
                                                 MetaOffsets[num] = reader.GetInt32();
                                                 len += 4;
                                             } while (num > 0);
-
+                                            Debug.WriteLine($"Processing Atom: {atomName}. MetaOffsets {MetaOffsets.Count()} ");
                                             Array.Reverse(MetaOffsets);
                                         }
                                     }
@@ -600,7 +698,7 @@ namespace Cromatix.MP4Reader
                                                 BaseMetadataDuration = MetadataLength * MetaClockDaemon / samples;
                                         }
                                     }
-
+                                    Debug.WriteLine($"Processing Atom: {atomName}. MetadataLength {MetadataLength} ");
                                     reader.Skip(atomSize - 8 - len);
                                 }
                                 else
@@ -614,6 +712,7 @@ namespace Cromatix.MP4Reader
                 }
                 else
                 {
+                    Debug.WriteLine("Skipping Atom: " + atomName);
                     reader.TrySkip(atomSize - 8);
                 }
 

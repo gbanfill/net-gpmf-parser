@@ -10,8 +10,15 @@ namespace Cromatix.MP4Reader
         {
             try
             {
-                uint number = BytesToInt(buffer, pos);
-                return IntToString(number, false);
+                if (pos + 4 <= buffer.Length)
+                {
+                    uint number = BytesToInt(buffer, pos);
+                    return IntToString(number, false);
+                }
+                else
+                {
+                    return string.Empty;
+                }
             }
             catch
             {
@@ -77,7 +84,7 @@ namespace Cromatix.MP4Reader
         internal static uint BytesToInt(ReadOnlySpan<byte> array)
         {
             var byteSpan = array.Slice(0, 4);
-            return BitConverter.ToUInt32(byteSpan);
+            return BitConverter.ToUInt32(byteSpan.ToArray(),0);
         }
 
         internal static ushort BytesToShort(byte[] array, int startPos)
@@ -87,7 +94,7 @@ namespace Cromatix.MP4Reader
         internal static ushort BytesToShort(ReadOnlySpan<byte> array)
         {
             var byteSpan = array.Slice(0, 2);
-            return BitConverter.ToUInt16(byteSpan);
+            return BitConverter.ToUInt16(byteSpan.ToArray(),0);
         }
 
         internal static int HexToInt(uint num)
@@ -112,7 +119,7 @@ namespace Cromatix.MP4Reader
             if (BitConverter.IsLittleEndian)
                 bytes = bytes.Reverse().ToArray();
 
-            return BitConverter.ToInt32(bytes, 0);
+            return BitConverter.ToInt32(bytes.ToArray(), 0);
         }
 
         internal static int ReadLong(ref ReadOnlySpan<byte> data)
@@ -126,7 +133,7 @@ namespace Cromatix.MP4Reader
                 target = tmp;
             }
 
-            var result = BitConverter.ToInt32(target);
+            var result = BitConverter.ToInt32(target.ToArray(),0);
             data = data.Slice(4);
             return result;
         }
@@ -142,7 +149,7 @@ namespace Cromatix.MP4Reader
                 target = tmp;
             }
 
-            var result = BitConverter.ToInt16(target);
+            var result = BitConverter.ToInt16(target.ToArray(), 0);
             data = data.Slice(2);
             return result;
         }
